@@ -117,6 +117,41 @@
     margin-top: 16px;
     text-align: center;
   }
+  .offsite-toggle {
+    margin-top: 16px;
+  }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .checkbox-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  #offsite-reason {
+    width: 100%;
+    font-size: 0.9rem;
+    letter-spacing: normal;
+    text-align: left;
+    padding: 10px 12px;
+    border: 1.5px solid var(--line);
+    border-radius: 8px;
+    background: var(--paper);
+    color: var(--ink);
+    outline: none;
+  }
+  #offsite-reason:focus {
+    border-color: var(--accent);
+  }
 </style>
 </head>
 <body>
@@ -136,6 +171,20 @@
       placeholder="000000"
       required
     >
+
+    <div class="offsite-toggle">
+      <label class="checkbox-label">
+        <input type="checkbox" id="offsite-checkbox">
+        I'm checking in from a client site today
+      </label>
+      <input
+        type="text"
+        id="offsite-reason"
+        placeholder="Client / site name"
+        style="display:none; margin-top: 10px;"
+      >
+    </div>
+
     <button type="submit" id="submit-btn">Mark attendance</button>
   </form>
 
@@ -145,7 +194,7 @@
 
 <script>
   // ---- Configure this ----
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyuyYQS_OTehVz4CcIuZ9fbfBsP15-9BtR2Za5zSdJGlnHMi4VpXtZB6Mib61fwwLEq9Q/exec";
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxcedmZo2NlY-MINp7p3SGLyuddAseqglJmRA5YZ1q9eoEvNZYDaT_vMGeQWwJfUy0pCg/exec";
   // -------------------------
 
   const form = document.getElementById('checkin-form');
@@ -185,6 +234,14 @@
     totpInput.value = totpInput.value.replace(/[^0-9]/g, '').slice(0, 6);
   });
 
+  const offsiteCheckbox = document.getElementById('offsite-checkbox');
+  const offsiteReasonInput = document.getElementById('offsite-reason');
+
+  offsiteCheckbox.addEventListener('change', () => {
+    offsiteReasonInput.style.display = offsiteCheckbox.checked ? 'block' : 'none';
+    if (!offsiteCheckbox.checked) offsiteReasonInput.value = '';
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
 
@@ -196,6 +253,10 @@
       setStatus('error', 'Enter the full 6-digit code.');
       return;
     }
+    if (offsiteCheckbox.checked && !offsiteReasonInput.value.trim()) {
+      setStatus('error', 'Enter the client / site name.');
+      return;
+    }
 
     submitBtn.disabled = true;
     submitBtn.textContent = 'Checking…';
@@ -203,11 +264,15 @@
     statusEl.textContent = 'Verifying…';
 
     try {
-      const body = new URLSearchParams({
+      const bodyParams = {
         totp_code: totpInput.value,
         lat: currentPosition.latitude,
         lng: currentPosition.longitude
-      });
+      };
+      if (offsiteCheckbox.checked) {
+        bodyParams.offsite_reason = offsiteReasonInput.value.trim();
+      }
+      const body = new URLSearchParams(bodyParams);
 
       const res = await fetch(WEB_APP_URL, {
         method: 'POST',
@@ -219,6 +284,7 @@
       if (data.status === 'success') {
         setStatus('success', data.message);
         form.reset();
+        offsiteReasonInput.style.display = 'none';
       } else {
         setStatus('error', data.message || 'Please refresh the page and enter your TOTP again. If the issue persists, contact admin.');
       }

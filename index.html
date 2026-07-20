@@ -152,25 +152,66 @@
   #offsite-reason:focus {
     border-color: var(--accent);
   }
+  .paired-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    font-size: 0.9rem;
+    color: var(--accent);
+  }
+  .paired-info strong {
+    font-weight: 700;
+  }
+  .switch-device {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    width: auto;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+    opacity: 0.85;
+  }
+  .switch-device:hover { opacity: 1; }
+  .setup-hint {
+    font-size: 0.78rem;
+    color: #8a8e95;
+    margin: -14px 0 16px;
+  }
 </style>
 </head>
 <body>
 
 <div class="card">
   <h1>Office check-in</h1>
-  <p class="sub">Enter the 6-digit code from your authenticator app.</p>
+  <p class="sub" id="sub-text">Enter the 6-digit code from your authenticator app. Scanning again later will automatically mark you as checked out (and checked back in after that).</p>
 
   <form id="checkin-form" autocomplete="off">
-    <label for="totp">Authentication code</label>
-    <input
-      type="text"
-      id="totp"
-      inputmode="numeric"
-      pattern="[0-9]*"
-      maxlength="6"
-      placeholder="000000"
-      required
-    >
+    <div id="paired-info" class="paired-info" style="display:none;">
+      <span>Checking in as <strong id="paired-name"></strong></span>
+      <button type="button" class="switch-device" id="switch-device-btn">Not you?</button>
+    </div>
+
+    <div id="totp-field">
+      <label for="totp">Authentication code</label>
+      <input
+        type="text"
+        id="totp"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        maxlength="6"
+        placeholder="000000"
+      >
+      <p class="setup-hint" id="setup-hint">One-time setup: after this, this device will remember your code and generate it for you automatically.</p>
+    </div>
 
     <div class="offsite-toggle">
       <label class="checkbox-label">
@@ -185,7 +226,7 @@
       >
     </div>
 
-    <button type="submit" id="submit-btn">Mark attendance</button>
+    <button type="submit" id="submit-btn">Check in / out</button>
   </form>
 
   <div id="status" class="status"></div>
@@ -194,11 +235,20 @@
 
 <script>
   // ---- Configure this ----
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxcedmZo2NlY-MINp7p3SGLyuddAseqglJmRA5YZ1q9eoEvNZYDaT_vMGeQWwJfUy0pCg/exec";
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzfSW2p674iYjejRhyRWcJVMM1Y8kiylBppzFNTe2gH2dcygZ2mvLEVV6ePnhRUppm5vA/exec";
   // -------------------------
 
+  const STORAGE_SECRET_KEY = 'checkin_totp_secret';
+  const STORAGE_NAME_KEY = 'checkin_totp_name';
+
   const form = document.getElementById('checkin-form');
+  const totpField = document.getElementById('totp-field');
   const totpInput = document.getElementById('totp');
+  const setupHint = document.getElementById('setup-hint');
+  const subText = document.getElementById('sub-text');
+  const pairedInfo = document.getElementById('paired-info');
+  const pairedName = document.getElementById('paired-name');
+  const switchDeviceBtn = document.getElementById('switch-device-btn');
   const submitBtn = document.getElementById('submit-btn');
   const statusEl = document.getElementById('status');
   const locationNote = document.getElementById('location-note');
@@ -209,6 +259,33 @@
     statusEl.className = 'status show ' + kind;
     statusEl.textContent = message;
   }
+
+  function isPaired() {
+    return !!(localStorage.getItem(STORAGE_SECRET_KEY) && localStorage.getItem(STORAGE_NAME_KEY));
+  }
+
+  function renderMode() {
+    if (isPaired()) {
+      const name = localStorage.getItem(STORAGE_NAME_KEY);
+      pairedInfo.style.display = 'flex';
+      pairedName.textContent = name;
+      totpField.style.display = 'none';
+      totpInput.removeAttribute('required');
+      subText.textContent = "This device remembers your code, so just tap the button below to check in or out.";
+    } else {
+      pairedInfo.style.display = 'none';
+      totpField.style.display = 'block';
+      subText.textContent = 'Enter the 6-digit code from your authenticator app.';
+      setupHint.style.display = 'block';
+    }
+  }
+
+  switchDeviceBtn.addEventListener('click', () => {
+    localStorage.removeItem(STORAGE_SECRET_KEY);
+    localStorage.removeItem(STORAGE_NAME_KEY);
+    totpInput.value = '';
+    renderMode();
+  });
 
   function requestLocation() {
     if (!navigator.geolocation) {
@@ -242,6 +319,48 @@
     if (!offsiteCheckbox.checked) offsiteReasonInput.value = '';
   });
 
+  // ---- Client-side TOTP (RFC 6238 / RFC 4226), matching the server exactly ----
+
+  function base32Decode(base32) {
+    const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    const clean = base32.toUpperCase().replace(/=+$/, '').replace(/\s/g, '');
+    let bits = '';
+    for (const char of clean) {
+      const val = ALPHABET.indexOf(char);
+      if (val === -1) throw new Error('Invalid secret');
+      bits += val.toString(2).padStart(5, '0');
+    }
+    const bytes = new Uint8Array(Math.floor(bits.length / 8));
+    for (let i = 0; i + 8 <= bits.length; i += 8) {
+      bytes[i / 8] = parseInt(bits.substring(i, i + 8), 2);
+    }
+    return bytes;
+  }
+
+  async function generateTOTP(base32Secret) {
+    const keyBytes = base32Decode(base32Secret);
+    const counter = Math.floor(Date.now() / 1000 / 30);
+
+    const counterBytes = new ArrayBuffer(8);
+    new DataView(counterBytes).setUint32(4, counter, false); // big-endian, low 32 bits
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw', keyBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+    );
+    const signature = await crypto.subtle.sign('HMAC', cryptoKey, counterBytes);
+    const hash = new Uint8Array(signature);
+
+    const offset = hash[hash.length - 1] & 0x0f;
+    const binary =
+      ((hash[offset] & 0x7f) << 24) |
+      ((hash[offset + 1] & 0xff) << 16) |
+      ((hash[offset + 2] & 0xff) << 8) |
+      (hash[offset + 3] & 0xff);
+
+    const otp = binary % 1000000;
+    return String(otp).padStart(6, '0');
+  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
 
@@ -249,13 +368,31 @@
       setStatus('error', 'Location not ready yet. Please wait a moment and try again.');
       return;
     }
-    if (totpInput.value.length !== 6) {
-      setStatus('error', 'Enter the full 6-digit code.');
-      return;
-    }
     if (offsiteCheckbox.checked && !offsiteReasonInput.value.trim()) {
       setStatus('error', 'Enter the client / site name.');
       return;
+    }
+
+    const paired = isPaired();
+    let code;
+
+    if (paired) {
+      if (!window.crypto || !window.crypto.subtle) {
+        setStatus('error', 'This browser can\'t auto-generate codes. Tap "Not you?" and enter your code manually.');
+        return;
+      }
+      try {
+        code = await generateTOTP(localStorage.getItem(STORAGE_SECRET_KEY));
+      } catch (err) {
+        setStatus('error', 'Could not generate your code on this device. Tap "Not you?" and enter it manually.');
+        return;
+      }
+    } else {
+      if (totpInput.value.length !== 6) {
+        setStatus('error', 'Enter the full 6-digit code.');
+        return;
+      }
+      code = totpInput.value;
     }
 
     submitBtn.disabled = true;
@@ -265,12 +402,15 @@
 
     try {
       const bodyParams = {
-        totp_code: totpInput.value,
+        totp_code: code,
         lat: currentPosition.latitude,
         lng: currentPosition.longitude
       };
       if (offsiteCheckbox.checked) {
         bodyParams.offsite_reason = offsiteReasonInput.value.trim();
+      }
+      if (!paired) {
+        bodyParams.pair = 'true'; // ask the server to hand back the secret for local storage
       }
       const body = new URLSearchParams(bodyParams);
 
@@ -283,19 +423,27 @@
 
       if (data.status === 'success') {
         setStatus('success', data.message);
-        form.reset();
+        if (!paired && data.secret && data.name) {
+          localStorage.setItem(STORAGE_SECRET_KEY, data.secret);
+          localStorage.setItem(STORAGE_NAME_KEY, data.name);
+          renderMode();
+        }
+        totpInput.value = '';
+        offsiteCheckbox.checked = false;
+        offsiteReasonInput.value = '';
         offsiteReasonInput.style.display = 'none';
       } else {
-        setStatus('error', data.message || 'Please refresh the page and enter your TOTP again. If the issue persists, contact admin.');
+        setStatus('error', data.message || 'Please refresh the page and try again. If the issue persists, contact admin.');
       }
     } catch (err) {
-      setStatus('error', 'Could not reach the server. Please refresh the page and enter your TOTP again. If the issue persists, contact admin.');
+      setStatus('error', 'Could not reach the server. Please refresh the page and try again. If the issue persists, contact admin.');
     } finally {
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Mark attendance';
+      submitBtn.textContent = 'Check in / out';
     }
   });
 
+  renderMode();
   requestLocation();
 </script>
 
